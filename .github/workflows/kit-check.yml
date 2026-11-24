@@ -1,0 +1,43 @@
+# Runs the official PLE `kit check` on GitHub-hosted Ubuntu, which has a real
+# Docker daemon. This VM has no Docker, so `kit check` cannot run here.
+# Trigger manually, or on every push to main.
+# Needs one repo secret: DEEPSEEK_API_KEY (your DeepSeek API key).
+# It is passed as MODEL_API_KEY; it never lands in the repo or logs
+# (kit redacts keys in check.json / console output).
+name: kit-check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  kit-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out harness (this repo is the entry)
+        uses: actions/checkout@v4
+
+      - name: Clone the official PLE kit
+        run: git clone --depth 1 https://github.com/google-research/ple ple-kit
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Run kit check (DeepSeek local model)
+        env:
+          MODEL_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd ple-kit
+          uv run python -m kit check "$GITHUB_WORKSPACE" \
+            --model-base-url https://api.deepseek.com/v1
+
+      - name: Upload kit check logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kit-check-logs
+          path: ~/.cache/plebench/
+          if-no-files-found: ignore
