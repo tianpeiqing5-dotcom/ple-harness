@@ -53,3 +53,10 @@ against a local OpenAI-compatible proxy (`OPENAI_BASE_URL`,
 `OPENAI_API_KEY`). That entry runs locally only; submit it with a
 `google-cloud/<id>` model and generate `artifacts/` with the same
 `model_api` you submit.
+
+## CI (GitHub Actions)
+
+`.github/workflows/kit-check.yml` runs `uv run python -m kit check` on
+every push to `main` and on manual dispatch. It needs one repository
+secret: `DEEPSEEK_API_KEY` (Settings → Secrets and variables → Actions),
+the DeepSeek API key used as `MODEL_API_KEY` for the check run.
