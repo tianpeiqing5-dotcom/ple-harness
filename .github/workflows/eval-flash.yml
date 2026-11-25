@@ -1,0 +1,107 @@
+# Runs the 29 public PLE dev tasks with the declared google-cloud model
+# (gemini-3.8-flash) through the kit's LiteLLM proxy backed by Vertex AI
+# in the user's own Google Cloud project (billed to that project).
+# Manual trigger only. Dispatch the smoke task first (default), then dispatch
+# again with tasks="" for the full dev set.
+# Needs repo secrets: GCP_SA_KEY (service-account JSON, Vertex AI User role),
+# GCP_PROJECT (project id), HF_TOKEN (read-only HF token for the dataset).
+name: eval-flash
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "Comma-separated dev task ids (empty = all 29)"
+        required: false
+        default: "solar-witness-test-package"
+
+permissions:
+  contents: write
+
+jobs:
+  eval-flash:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out harness (this repo is the entry)
+        uses: actions/checkout@v4
+
+      - name: Clone the official PLE kit
+        run: git clone --depth 1 https://github.com/google-research/ple ple-kit
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install Harbor
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv tool install harbor==0.20.0 --with websockets
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Free disk space
+        run: |
+          df -h
+          docker system prune -af || true
+          df -h
+
+      - name: Start the model proxy
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          PROXY_KEY=$(openssl rand -hex 24)
+          echo "::add-mask::$PROXY_KEY"
+          echo "PROXY_KEY=$PROXY_KEY" >> "$GITHUB_ENV"
+          cd ple-kit
+          VERTEXAI_PROJECT="${{ secrets.GCP_PROJECT }}" MODEL_PROXY_KEY="$PROXY_KEY" \
+            nohup ./kit/model_proxy/start.sh > ../proxy.log 2>&1 &
+          echo $! > ../proxy.pid
+          for i in $(seq 1 60); do
+            if curl -sf -H "Authorization: Bearer $PROXY_KEY" http://localhost:4000/v1/models > /dev/null 2>&1; then
+              echo "proxy up after ${i}x5s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "proxy did not come up"; tail -50 ../proxy.log; exit 1
+
+      - name: Run the dev set with eval/run.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          printf 'MODEL_PROXY_URL=http://localhost:4000\nMODEL_PROXY_KEY=%s\nJUDGE_MODEL=gemini-3.8-flash\n' "$PROXY_KEY" > local.env
+          cd ple-kit
+          ARGS=("$GITHUB_WORKSPACE" --env-file "$GITHUB_WORKSPACE/local.env" --out "$GITHUB_WORKSPACE/runs/flash-${{ github.run_id }}")
+          if [ -n "${{ inputs.tasks }}" ]; then ARGS+=(--tasks "${{ inputs.tasks }}"); fi
+          uv run python eval/run.py "${ARGS[@]}" 2>&1 | tee "$GITHUB_WORKSPACE/eval-run.log"
+
+      - name: Review the exported artifacts
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd ple-kit
+          uv run python -m kit artifacts "$GITHUB_WORKSPACE"
+
+      - name: Commit artifacts back to main
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "ple-eval-bot"
+          git config user.email "ple-eval-bot@users.noreply.github.com"
+          git add artifacts
+          git diff --cached --quiet && echo "no artifacts changes to commit" || git commit -m "Dev artifacts: gemini-3.8-flash run ${{ github.run_id }} (${{ inputs.tasks || 'full dev set' }})"
+          git push origin main
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-flash-logs-${{ github.run_id }}
+          path: |
+            proxy.log
+            eval-run.log
+          if-no-files-found: ignore

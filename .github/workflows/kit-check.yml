@@ -39,13 +39,18 @@ jobs:
           # to DeepSeek; the real submission.yaml stays google-cloud.
           cp -r "$GITHUB_WORKSPACE" /tmp/entry-deepseek
           python3 - <<'EOF'
-          import pathlib
+          import pathlib, re
           p = pathlib.Path("/tmp/entry-deepseek/submission.yaml")
           t = p.read_text()
-          t = t.replace(
-              "model_api: google-cloud/claude-opus-5-5",
+          # Match whatever google-cloud model the entry currently declares
+          # (claude-opus-5-5, gemini-3.8-flash, ...), so this step survives
+          # a model switch.
+          t, n = re.subn(
+              r"^model_api: google-cloud/\S+$",
               "model_api: openai-compatible/deepseek-flash\nmodel_base_url: https://llm.example.org/v1",
+              t, count=1, flags=re.M,
           )
+          assert n == 1, "no google-cloud model_api line found to swap"
           p.write_text(t)
           EOF
           grep -E "model_api|model_base_url" /tmp/entry-deepseek/submission.yaml
