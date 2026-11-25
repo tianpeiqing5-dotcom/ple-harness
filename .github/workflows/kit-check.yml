@@ -4,6 +4,11 @@
 # Needs one repo secret: DEEPSEEK_API_KEY (your DeepSeek API key).
 # It is passed as MODEL_API_KEY; it never lands in the repo or logs
 # (kit redacts keys in check.json / console output).
+# NOTE: the entry's submission.yaml declares google-cloud/claude-opus-5-5,
+# and `kit check` has no --model flag (--model-base-url is rejected for
+# google-cloud models). CI therefore checks a throwaway copy with the model
+# switched back to DeepSeek, so the harness is still exercised end to end;
+# the real submission.yaml is untouched.
 name: kit-check
 
 on:
@@ -25,13 +30,27 @@ jobs:
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
-      - name: Run kit check (DeepSeek local model)
+      - name: Run kit check (DeepSeek test copy)
         env:
           MODEL_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           export PATH="$HOME/.local/bin:$PATH"
+          # See the header note: check a copy with the model switched back
+          # to DeepSeek; the real submission.yaml stays google-cloud.
+          cp -r "$GITHUB_WORKSPACE" /tmp/entry-deepseek
+          python3 - <<'EOF'
+          import pathlib
+          p = pathlib.Path("/tmp/entry-deepseek/submission.yaml")
+          t = p.read_text()
+          t = t.replace(
+              "model_api: google-cloud/claude-opus-5-5",
+              "model_api: openai-compatible/deepseek-flash\nmodel_base_url: https://llm.example.org/v1",
+          )
+          p.write_text(t)
+          EOF
+          grep -E "model_api|model_base_url" /tmp/entry-deepseek/submission.yaml
           cd ple-kit
-          uv run python -m kit check "$GITHUB_WORKSPACE" \
+          uv run python -m kit check /tmp/entry-deepseek \
             --model-base-url https://api.deepseek.com/v1
 
       - name: Upload kit check logs on failure
