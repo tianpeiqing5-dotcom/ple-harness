@@ -103,6 +103,13 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "32000"))
 # breakpoints) so each turn reads the prior conversation from cache. Other
 # providers cache automatically without markers.
 CACHE_MARK = "claude" in MODEL.lower()
+# DeepSeek's thinking models reject a follow-up call when an assistant
+# message in the history has no reasoning_content: the field must be passed
+# back verbatim. The per-turn append keeps it (model_dump carries extras),
+# but a turn the model answered without reasoning, and the synthetic progress
+# note compact() inserts, have none — so those get a placeholder instead.
+NEED_REASONING = "deepseek" in MODEL.lower()
+REASONING_PLACEHOLDER = "[no reasoning returned for this turn]"
 # the planner wraps up once it has used this share of the task's time
 PLAN_SHARE = 0.1
 # the worker wraps up when this share is left, to keep time for checking and
@@ -497,6 +504,28 @@ def marked(messages):
   return out
 
 
+def _with_reasoning(messages):
+  """Fills in reasoning_content on assistant messages that lack it.
+
+  DeepSeek thinking models refuse a call whose history holds an assistant
+  message without reasoning_content. Model turns keep theirs (see agent());
+  this covers the synthetic progress note compact() inserts and any turn the
+  model answered without reasoning. Mutates in place so the stored history
+  stays valid too. A no-op for non-DeepSeek models.
+
+  Args:
+    messages: The conversation, modified in place.
+
+  Returns:
+    The same list.
+  """
+  if NEED_REASONING:
+    for m in messages:
+      if m.get("role") == "assistant" and not m.get("reasoning_content"):
+        m["reasoning_content"] = REASONING_PLACEHOLDER
+  return messages
+
+
 class Evidence:
   """Structured per-task evidence log, written on the harness host.
 
@@ -758,9 +787,18 @@ async def compact(session, messages, evidence):
   if not note:
     return False
   head = messages[:2]
-  messages[:] = head + [
-      {"role": "assistant", "content": "[Progress note after compaction]\n" + note}
-  ] + tail
+  note_msg = {
+      "role": "assistant",
+      "content": "[Progress note after compaction]\n" + note,
+  }
+  if NEED_REASONING:
+    # a fabricated assistant message still needs reasoning_content, or the
+    # next DeepSeek call is refused
+    note_msg["reasoning_content"] = (
+        "[Compacted history: the dropped middle was summarized into the"
+        " progress note above.]"
+    )
+  messages[:] = head + [note_msg] + tail
   if evidence is not None:
     evidence.record("compact", kept_turns=len(tail), note_chars=len(note))
   await session.log(
@@ -861,7 +899,7 @@ async def agent(session, messages, tools, until, final=False, role="worker",
       reply = await asyncio.wait_for(
           client.chat.completions.create(
               model=MODEL,
-              messages=marked(messages),
+              messages=marked(_with_reasoning(messages)),
               tools=tools,
               tool_choice="none" if wrap_up else "auto",
               reasoning_effort=EFFORT,
@@ -904,8 +942,12 @@ async def agent(session, messages, tools, until, final=False, role="worker",
     if final and text:
       session.final_message = text
     # sent back as returned: Gemini refuses a tool call without its thought
-    # signature
+    # signature, and DeepSeek refuses a turn without its reasoning_content
     turn = message.model_dump(exclude_none=True)
+    if NEED_REASONING and not turn.get("reasoning_content"):
+      # the model answered this turn without reasoning; the next call still
+      # needs the field present on the message we send back
+      turn["reasoning_content"] = REASONING_PLACEHOLDER
     if wrap_up or not message.tool_calls:
       turn.pop("tool_calls", None)  # calls made at the wrap-up are not run
       if message.content:
