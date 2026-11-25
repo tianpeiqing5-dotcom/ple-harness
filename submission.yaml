@@ -13,8 +13,7 @@
 # limitations under the License.
 
 name: plan-verify
-model_api: openai-compatible/deepseek-flash
-model_base_url: https://llm.example.org/v1
+model_api: google-cloud/claude-opus-5-5
 install: >-
   uv venv --python 3.12 /opt/harness/venv
   && uv pip install --python /opt/harness/venv/bin/python -r {src}/requirements.txt
